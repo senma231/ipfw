@@ -1,4 +1,4 @@
-# ipfw
+# ipfw一键转发脚本 
 基本命令格式
 ```
 ./ipfw.sh <command> [arguments]
