@@ -60,12 +60,36 @@ init_config_dirs() {
 check_system_settings() {
     echo -e "${YELLOW}正在检查系统配置...${NC}"
     
-    # 检查并启用IP转发
+    # 检查并启用IPv4转发
     if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != "1" ]; then
-        echo -e "${YELLOW}正在启用IP转发...${NC}"
+        echo -e "${YELLOW}正在启用IPv4转发...${NC}"
         echo 1 > /proc/sys/net/ipv4/ip_forward
         echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
         sysctl -p
+    fi
+
+    # 检查并启用IPv6转发
+    if [ -f /proc/sys/net/ipv6/conf/all/forwarding ]; then
+        if [ "$(cat /proc/sys/net/ipv6/conf/all/forwarding)" != "1" ]; then
+            echo -e "${YELLOW}正在启用IPv6转发...${NC}"
+            echo 1 > /proc/sys/net/ipv6/conf/all/forwarding
+            echo "net.ipv6.conf.all.forwarding = 1" >> /etc/sysctl.conf
+            sysctl -p
+        fi
+    else
+        echo -e "${YELLOW}警告: 系统不支持IPv6或IPv6模块未加载${NC}"
+    fi
+
+    # 检查并启用IPv6
+    if [ -f /proc/sys/net/ipv6/conf/all/disable_ipv6 ]; then
+        if [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6)" == "1" ]; then
+            echo -e "${YELLOW}检测到IPv6被禁用，正在启用...${NC}"
+            echo 0 > /proc/sys/net/ipv6/conf/all/disable_ipv6
+            echo 0 > /proc/sys/net/ipv6/conf/default/disable_ipv6
+            echo "net.ipv6.conf.all.disable_ipv6 = 0" >> /etc/sysctl.conf
+            echo "net.ipv6.conf.default.disable_ipv6 = 0" >> /etc/sysctl.conf
+            sysctl -p
+        fi
     fi
     
     # 检查防火墙配置
@@ -182,37 +206,76 @@ check_dependencies() {
     echo -e "${GREEN}依赖工具检查完成${NC}"
 }
 
-# 检查并启用IPv6支持
+# 检测IPv6支持情况
 check_ipv6_support() {
-    echo -e "${CYAN}检查IPv6支持...${NC}"
+    echo -e "${YELLOW}正在检测IPv6支持...${NC}"
     
-    # 检查是否支持IPv6
-    if [ ! -f /proc/sys/net/ipv6/conf/all/disable_ipv6 ]; then
-        echo -e "${YELLOW}警告: 系统可能不支持IPv6${NC}"
+    # 初始化状态变量
+    local has_ipv6_addr=false
+    local has_ipv6_network=false
+    local ipv6_enabled=false
+    
+    # 检查IPv6是否启用
+    if [ -f /proc/sys/net/ipv6/conf/all/disable_ipv6 ] && [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6)" == "0" ]; then
+        ipv6_enabled=true
+    fi
+    
+    # 检查IPv6地址
+    if ip -6 addr show | grep -q "inet6"; then
+        has_ipv6_addr=true
+    fi
+    
+    # 检查IPv6网络连通性
+    if ping6 -c 1 -W 2 ipv6.google.com >/dev/null 2>&1; then
+        has_ipv6_network=true
+    fi
+    
+    # 显示检测结果
+    if $has_ipv6_addr; then
+        echo -e "${GREEN}√ 系统有IPv6地址${NC}"
+    else
+        echo -e "${RED}× 系统无IPv6地址${NC}"
+    fi
+    
+    if $has_ipv6_network; then
+        echo -e "${GREEN}√ 可以访问IPv6网络${NC}"
+    else
+        echo -e "${RED}× 无法访问IPv6网络${NC}"
+    fi
+    
+    if $ipv6_enabled; then
+        echo -e "${GREEN}√ 系统已启用IPv6${NC}"
+    else
+        echo -e "${RED}× 系统未启用IPv6${NC}"
+    fi
+    
+    echo -e "\n${YELLOW}IPv6地址信息:${NC}"
+    ip -6 addr show | grep "inet6" | while read -r line; do
+        addr=$(echo "$line" | awk '{print $2}')
+        echo "  $addr"
+    done
+    
+    echo -e "\n${YELLOW}公网IPv6地址:${NC}"
+    public_ipv6=$(ip -6 addr show | grep -v "inet6 ::1" | grep -v "inet6 fe80" | grep "inet6" | awk '{print $2}' | cut -d'/' -f1)
+    if [ -n "$public_ipv6" ]; then
+        echo "  $public_ipv6"
+    else
+        echo "  无法获取公网IPv6地址"
+    fi
+    
+    echo -e "\n${YELLOW}IPv6路由信息:${NC}"
+    ip -6 route show | while read -r line; do
+        echo "  $line"
+    done
+    
+    echo
+    if ! $has_ipv6_network || ! $has_ipv6_addr; then
+        echo -e "${RED}! VPS IPv6支持不完整${NC}"
         return 1
+    else
+        echo -e "${GREEN}✓ VPS IPv6支持完整${NC}"
+        return 0
     fi
-    
-    # 检查IPv6是否被禁用
-    if [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6)" -eq 1 ]; then
-        echo -e "${YELLOW}IPv6当前被禁用，正在启用...${NC}"
-        sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null
-        sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null
-    fi
-    
-    # 启用IPv6转发
-    if [ "$(cat /proc/sys/net/ipv6/conf/all/forwarding)" -eq 0 ]; then
-        echo -e "${GREEN}启用IPv6转发...${NC}"
-        sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
-    fi
-    
-    # 检查ip6tables命令
-    if ! command -v ip6tables >/dev/null 2>&1; then
-        echo -e "${YELLOW}警告: ip6tables未安装，IPv6转发功能将不可用${NC}"
-        return 1
-    fi
-    
-    echo -e "${GREEN}IPv6支持检查完成${NC}"
-    return 0
 }
 
 # 保存iptables规则
@@ -460,27 +523,86 @@ delete_forward() {
     esac
 }
 
+# 删除转发规则
+delete_forward_rule() {
+    echo -e "${YELLOW}请选择要删除的规则类型:${NC}"
+    echo -e "1. 删除指定端口的转发规则"
+    echo -e "2. 删除所有转发规则"
+    echo -e "0. 返回"
+    
+    read -r sub_choice
+    case $sub_choice in
+        1)
+            echo -e "${YELLOW}当前转发规则:${NC}"
+            list_forwards
+            echo
+            read -p "请输入要删除的本地端口: " local_port
+            if [ -z "$local_port" ]; then
+                echo -e "${RED}错误: 端口不能为空${NC}"
+                return 1
+            fi
+            
+            # 检查端口是否存在转发规则
+            if ! iptables -t nat -L PREROUTING -n | grep -q "dpt:$local_port"; then
+                echo -e "${RED}错误: 未找到端口 $local_port 的转发规则${NC}"
+                return 1
+            fi
+            
+            # 获取目标地址和端口
+            target_info=$(iptables -t nat -L PREROUTING -n | grep "dpt:$local_port" | awk '{print $8}')
+            target_addr=$(echo "$target_info" | cut -d: -f1)
+            target_port=$(echo "$target_info" | cut -d: -f2)
+            
+            # 删除IPv4规则
+            iptables -t nat -D PREROUTING -p tcp --dport "$local_port" -j DNAT --to-destination "$target_addr:$target_port"
+            iptables -D FORWARD -p tcp -d "$target_addr" --dport "$target_port" -j ACCEPT
+            
+            # 如果支持IPv6，也删除IPv6规则
+            if check_ipv6_support >/dev/null 2>&1; then
+                ip6tables -t nat -D PREROUTING -p tcp --dport "$local_port" -j DNAT --to-destination "[$target_addr]:$target_port" 2>/dev/null
+                ip6tables -D FORWARD -p tcp -d "$target_addr" --dport "$target_port" -j ACCEPT 2>/dev/null
+            fi
+            
+            echo -e "${GREEN}成功删除端口 $local_port 的转发规则${NC}"
+            ;;
+        2)
+            clear_all_rules
+            ;;
+        0)
+            return 0
+            ;;
+        *)
+            echo -e "${RED}无效选项${NC}"
+            return 1
+            ;;
+    esac
+}
+
 # 主菜单
 main_menu() {
     while true; do
         echo -e "\n${YELLOW}=== 端口转发管理工具 ===${NC}"
         echo -e "1. 添加转发规则"
         echo -e "2. 删除转发规则"
-        echo -e "3. 查看所有规则"
-        echo -e "4. 退出"
+        echo -e "3. 查看所有转发规则"
+        echo -e "4. 检测IPv6支持"
+        echo -e "5. 退出"
         
-        read -p "请选择操作 [1-4]: " choice
+        read -p "请选择操作 [1-5]: " choice
         case $choice in
             1)
                 add_forward
                 ;;
             2)
-                delete_forward
+                delete_forward_rule
                 ;;
             3)
                 list_forwards
                 ;;
             4)
+                check_ipv6_support
+                ;;
+            5)
                 echo -e "${GREEN}感谢使用，再见！${NC}"
                 exit 0
                 ;;
@@ -682,28 +804,6 @@ handle_args() {
     esac
 }
 
-# 创建ipfw快捷命令
-create_ipfw_command() {
-    echo -e "${YELLOW}正在创建ipfw快捷命令...${NC}"
-    
-    # 获取脚本的绝对路径
-    SCRIPT_PATH=$(readlink -f "$0")
-    
-    # 创建快捷命令
-    cat > /usr/local/bin/ipfw << EOF
-#!/bin/bash
-$SCRIPT_PATH "\$@"
-EOF
-    
-    # 设置执行权限
-    chmod +x /usr/local/bin/ipfw
-    
-    echo -e "${GREEN}ipfw快捷命令创建成功${NC}"
-    echo -e "现在可以直接使用 ${CYAN}ipfw${NC} 命令，例如："
-    echo -e "  ${CYAN}ipfw add 80 192.168.1.100 8080${NC}"
-    echo -e "  ${CYAN}ipfw list${NC}"
-}
-
 # 检查并删除旧的快捷命令
 check_and_remove_old_command() {
     if [ -f /usr/local/bin/forward ]; then
@@ -721,9 +821,8 @@ check_system_settings
 check_iptables_env
 check_xray_env
 
-# 创建ipfw快捷命令
+# 检查并删除旧的快捷命令
 check_and_remove_old_command
-create_ipfw_command
 
 # 处理命令行参数
 handle_args "$@"
